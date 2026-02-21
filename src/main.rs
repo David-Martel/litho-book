@@ -63,7 +63,10 @@ async fn main() -> anyhow::Result<()> {
                 Some(tx)
             }
             Err(e) => {
-                warn!("Failed to start file watcher: {}. Continuing without hot reload.", e);
+                warn!(
+                    "Failed to start file watcher: {}. Continuing without hot reload.",
+                    e
+                );
                 None
             }
         }

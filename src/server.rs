@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 use axum::{
     Router,
@@ -265,10 +265,7 @@ async fn health_handler() -> Json<serde_json::Value> {
 async fn events_handler(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = state
-        .watcher_tx
-        .as_ref()
-        .map(|tx| tx.subscribe());
+    let rx = state.watcher_tx.as_ref().map(|tx| tx.subscribe());
 
     let stream = async_stream::stream! {
         if let Some(mut rx) = rx {
