@@ -25,3 +25,4 @@ target
 litho-book.toml
 .litho/
 litho.docs/
+.claude/
