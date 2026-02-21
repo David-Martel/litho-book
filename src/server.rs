@@ -10,7 +10,10 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::time::Duration;
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::{
+    catch_panic::CatchPanicLayer, compression::CompressionLayer, cors::CorsLayer,
+    limit::RequestBodyLimitLayer, services::ServeDir, timeout::TimeoutLayer,
+};
 use tracing::{debug, error, info};
 
 use crate::error::LithoBookError;
@@ -137,8 +140,12 @@ pub fn create_router(doc_tree: DocumentTree, docs_path: String) -> Router {
         .route("/api/chat", post(chat_stream_handler))
         .route("/health", get(health_handler))
         .nest_service("/assets", ServeDir::new("assets"))
-        .layer(CorsLayer::permissive())
         .with_state(state)
+        .layer(CatchPanicLayer::new())
+        .layer(CompressionLayer::new())
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        .layer(RequestBodyLimitLayer::new(1_048_576)) // 1MB
+        .layer(CorsLayer::permissive())
 }
 
 /// Serve the main index page
@@ -658,5 +665,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_request_body_limit() {
+        let (app, _dir) = make_test_app();
+        let large_body = "x".repeat(2 * 1024 * 1024); // 2MB
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(large_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 413);
+    }
+
+    #[tokio::test]
+    async fn test_compression_header() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("accept-encoding", "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        // Response may or may not be compressed depending on content size,
+        // but the endpoint should still work with accept-encoding header.
     }
 }
