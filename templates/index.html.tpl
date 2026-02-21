@@ -3612,14 +3612,27 @@
                 });
             }
 
+            function findArchitectureFile() {
+                const candidates = ['architecture.md', 'ARCHITECTURE.md', '2.Architecture.md',
+                    '2、架构概览.md', '架构概览.md', 'README.md'];
+                for (const name of candidates) {
+                    // Search allFiles (the flat file list) for a match
+                    if (typeof allFiles !== 'undefined') {
+                        const found = allFiles.find(f => {
+                            const fileName = f.path.split('/').pop();
+                            return fileName === name;
+                        });
+                        if (found) return { name: found.path.split('/').pop(), path: found.path };
+                    }
+                }
+                return { name: 'README.md', path: 'README.md' };
+            }
+
             // 初始化默认上下文
             function initializeDefaultContext() {
                 // 默认添加架构概览文档
-                selectedContextFiles = [{
-                    name: '2、架构概览.md',
-                    path: '2、架构概览.md'
-                }];
-                
+                selectedContextFiles = [findArchitectureFile()];
+
                 // 如果有当前文件，也添加到上下文
                 if (currentFile) {
                     const currentFileName = currentFile.split('/').pop();
@@ -3699,7 +3712,8 @@
 
             // 初始化默认文档加载（带降级策略）
             async function initializeDefaultDocument() {
-                const defaultFiles = ['1、项目概述.md', '1.Overview.md', 'README.md', 'Overview.md', '项目概述.md'];
+                const defaultFiles = ['README.md', 'index.md', 'README_zh.md',
+                    '1.Overview.md', 'Overview.md', '1、项目概述.md', '項目概述.md'];
                 
                 for (const fileName of defaultFiles) {
                     try {
@@ -4965,7 +4979,8 @@
                     checkbox.checked = isSelected;
                     
                     // 默认选中架构概览文档
-                    if (node.name === '2、架构概览.md') {
+                    const archFile = findArchitectureFile();
+                    if (node.name === archFile.name) {
                         checkbox.checked = true;
                         // 如果还没有添加到选中列表，则添加
                         if (!isSelected) {
@@ -5207,11 +5222,8 @@
             // 初始化默认上下文
             function initializeDefaultContext() {
                 // 默认添加架构概览文档
-                selectedContextFiles = [{
-                    name: '2、架构概览.md',
-                    path: '2、架构概览.md'
-                }];
-                
+                selectedContextFiles = [findArchitectureFile()];
+
                 // 如果有当前文件，也添加到上下文
                 if (currentFile) {
                     const currentFileName = currentFile.split('/').pop();
@@ -5220,7 +5232,7 @@
                         path: currentFile
                     });
                 }
-                
+
                 // 更新上下文标签显示
                 updateContextTags();
             }
@@ -5501,6 +5513,11 @@
                 }
             }
 
+            function escapeHtml(s) {
+                return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                        .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+            }
+
             // 简单的代码渲染
             function renderSimpleMarkdown(text) {
                 // 先处理 mermaid 代码块（在普通代码块之前）
@@ -5517,7 +5534,7 @@
 
                 // 处理普通代码块（排除已处理的 mermaid）
                 text = text.replace(/```(\w+)?\n([\s\S]*?)\n```/g, (match, lang, code) => {
-                    return `<pre><code class="language-${lang || ''}">${code}</code></pre>`;
+                    return `<pre><code class="language-${escapeHtml(lang || '')}">${escapeHtml(code)}</code></pre>`;
                 });
 
                 // 处理其他 markdown 语法（但不处理换行符）
@@ -5619,11 +5636,8 @@
             // 初始化默认上下文
             function initializeDefaultContext() {
                 // 默认添加架构概览文档
-                selectedContextFiles = [{
-                    name: '2、架构概览.md',
-                    path: '2、架构概览.md'
-                }];
-                
+                selectedContextFiles = [findArchitectureFile()];
+
                 // 更新上下文标签显示
                 updateContextTags();
             }

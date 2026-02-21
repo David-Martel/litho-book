@@ -2,6 +2,7 @@ mod cli;
 mod error;
 mod filesystem;
 mod server;
+mod utils;
 
 use clap::Parser;
 use tracing::{error, info, warn};
@@ -11,21 +12,21 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 async fn main() -> anyhow::Result<()> {
     // Parse command line arguments
     let args = cli::Args::parse();
-    
+
     // Initialize logging
     init_logging(args.verbose);
-    
+
     // Print banner
     print_banner();
-    
+
     // Validate arguments
     if let Err(e) = args.validate() {
         error!("参数验证失败: {}", e);
         std::process::exit(1);
     }
-    
+
     info!("正在扫描文档目录: {}", args.docs_dir.display());
-    
+
     // Build document tree
     let doc_tree = match filesystem::DocumentTree::new(&args.docs_dir) {
         Ok(tree) => {
@@ -34,13 +35,13 @@ async fn main() -> anyhow::Result<()> {
                 "成功扫描文档目录: {} 个文件, {} 个目录, 总大小: {}",
                 stats.total_files,
                 stats.total_dirs,
-                format_bytes(stats.total_size)
+                utils::format_bytes(stats.total_size)
             );
-            
+
             if stats.total_files == 0 {
                 warn!("未找到任何 Markdown 文件，请检查目录是否包含 .md 文件");
             }
-            
+
             tree
         }
         Err(e) => {
@@ -48,11 +49,11 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
-    
+
     // Create router
     let docs_path = args.docs_dir.display().to_string().replace('\\', "/");
     let app = server::create_router(doc_tree, docs_path);
-    
+
     // Start server
     let bind_address = args.bind_address();
     let listener = match tokio::net::TcpListener::bind(&bind_address).await {
@@ -65,14 +66,14 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
-    
+
     let server_url = args.server_url();
-    
+
     info!("🚀 Litho Book 服务器启动成功!");
     info!("📖 访问地址: {}", server_url);
     info!("📁 文档目录: {}", args.docs_dir.display());
     info!("⏹️  按 Ctrl+C 停止服务器");
-    
+
     // Auto-open browser
     if args.open {
         info!("正在打开浏览器...");
@@ -81,13 +82,13 @@ async fn main() -> anyhow::Result<()> {
             info!("请手动访问: {}", server_url);
         }
     }
-    
+
     // Start server
     if let Err(e) = axum::serve(listener, app).await {
         error!("服务器运行错误: {}", e);
         std::process::exit(1);
     }
-    
+
     Ok(())
 }
 
@@ -98,7 +99,7 @@ fn init_logging(verbose: bool) {
     } else {
         tracing_subscriber::filter::LevelFilter::INFO
     };
-    
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -106,7 +107,7 @@ fn init_logging(verbose: bool) {
                 .with_thread_ids(false)
                 .with_thread_names(false)
                 .with_file(false)
-                .with_line_number(false)
+                .with_line_number(false),
         )
         .with(filter)
         .init();
@@ -129,59 +130,30 @@ fn open_browser(url: &str) -> anyhow::Result<()> {
             .args(["/c", "start", "", url])
             .spawn()?;
     }
-    
+
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()?;
+        std::process::Command::new("open").arg(url).spawn()?;
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         // Try different browsers in order of preference
         let browsers = ["xdg-open", "firefox", "chromium", "google-chrome"];
-        
+
         for browser in &browsers {
-            if std::process::Command::new(browser)
-                .arg(url)
-                .spawn()
-                .is_ok()
-            {
+            if std::process::Command::new(browser).arg(url).spawn().is_ok() {
                 return Ok(());
             }
         }
-        
+
         anyhow::bail!("No suitable browser found");
     }
-    
+
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         anyhow::bail!("Automatic browser opening not supported on this platform");
     }
-    
-    Ok(())
-}
 
-/// Format bytes into human-readable format
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-    
-    let mut size = bytes as f64;
-    let mut unit_index = 0;
-    
-    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_index += 1;
-    }
-    
-    if unit_index == 0 {
-        format!("{} {}", bytes, UNITS[unit_index])
-    } else {
-        format!("{:.1} {}", size, UNITS[unit_index])
-    }
+    Ok(())
 }

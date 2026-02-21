@@ -1,0 +1,244 @@
+================================================================================
+SECURITY AUDIT EXECUTIVE SUMMARY - litho-book v0.3.9
+================================================================================
+
+AUDIT DATE:        2026-02-20
+STATUS:            RESEARCH ONLY - NO CODE CHANGES
+FINDINGS:          7 (2 Critical, 3 High, 2 Medium)
+OVERALL RISK:      HIGH (if exposed beyond localhost)
+
+================================================================================
+CRITICAL FINDINGS (Must fix before production)
+================================================================================
+
+1. XSS in AI Chat Responses (CRITICAL)
+   ├─ Location: templates/index.html.tpl (lines 5348, 5381, 5391, 5398)
+   ├─ Issue: LLM responses rendered via innerHTML without sanitization
+   ├─ Impact: Script injection, session hijacking, credential theft
+   ├─ Fix: Use DOMPurify or textContent escaping (30 minutes)
+   ├─ Test: Inject <img src=x onerror="alert(1)"> via chat
+   └─ OWASP: A03:2021 - Injection (CWE-79)
+
+2. Path Traversal Whitelist Bypass (CRITICAL)
+   ├─ Location: src/filesystem.rs (lines 254-265)
+   ├─ Issue: HashMap lookup lacks runtime path validation
+   ├─ Impact: Possible escape from docs directory via symlinks/canonicalization
+   ├─ Fix: Add canonical path verification at retrieval (20 minutes)
+   ├─ Test: curl "http://localhost:3000/api/file?file=../../etc/passwd"
+   └─ OWASP: A01:2021 - Broken Access Control (CWE-22)
+
+================================================================================
+HIGH FINDINGS (Fix before network exposure)
+================================================================================
+
+3. Permissive CORS (HIGH)
+   ├─ Location: src/server.rs (line 120)
+   ├─ Issue: CorsLayer::permissive() allows any origin
+   ├─ Current Risk: LOW (localhost binding only)
+   ├─ Future Risk: CRITICAL if bound to 0.0.0.0
+   ├─ Fix: Whitelist localhost origins (15 minutes)
+   ├─ Test: curl -H "Origin: http://evil.com" http://localhost:3000/api/search
+   └─ OWASP: A01:2021 - Broken Access Control (CWE-435)
+
+4. API Key Exposure (HIGH)
+   ├─ Location: src/server.rs (lines 393-405)
+   ├─ Issue: LITHO_BOOK_LLM_KEY from env vars, sent in plaintext
+   ├─ Risk: Shell history compromise, process list exposure
+   ├─ Fix: Use .env files + secrets management (45 minutes)
+   ├─ Test: ps aux | grep LITHO_BOOK_LLM_KEY
+   └─ OWASP: A02:2021 - Cryptographic Failures (CWE-798)
+
+5. Missing Input Size Limits (HIGH)
+   ├─ Location: src/server.rs (lines 59-62, 248, 293-356)
+   ├─ Issue: No max payload/query size limits
+   ├─ Risk: DoS via memory exhaustion or CPU spinning
+   ├─ Fix: Add RequestBodyLimitLayer + field validation (45 minutes)
+   ├─ Test: curl -X POST /api/chat -d '{"message":"'$(python3 -c "print(\"A\"*100000000)")'"}'
+   └─ OWASP: A01:2021 - Broken Access Control (CWE-400)
+
+================================================================================
+MEDIUM FINDINGS (Fix for hardening)
+================================================================================
+
+6. Weak Windows Privilege Check (MEDIUM)
+   ├─ Location: src/cli.rs (lines 69-86)
+   ├─ Issue: is_privileged() always returns true on Windows
+   ├─ Impact: Users get confusing errors instead of early validation
+   ├─ Fix: Implement proper admin detection (15 minutes)
+   └─ OWASP: A04:2021 - Insecure Design (CWE-250)
+
+7. Information Disclosure in Errors (MEDIUM)
+   ├─ Location: src/server.rs, src/filesystem.rs
+   ├─ Issue: Error messages expose file paths and system errors
+   ├─ Impact: Reveals internal structure, helps attackers enumerate files
+   ├─ Fix: Generic error messages + internal logging (20 minutes)
+   └─ OWASP: A01:2021 - Broken Access Control (CWE-209)
+
+================================================================================
+REMEDIATION TIMELINE
+================================================================================
+
+WEEK 1 (Immediate - 2-3 hours total)
+│
+├─ [15 min] Finding #2: Add DOMPurify to index.html.tpl
+├─ [15 min] Finding #5: Add RequestBodyLimitLayer
+├─ [15 min] Finding #7: Replace error messages with generics
+│
+└─ Result: XSS, DoS, and info disclosure fixed
+
+WEEK 2 (Before network exposure - 2 hours total)
+│
+├─ [20 min] Finding #1: Add canonical path validation
+├─ [20 min] Finding #4: Implement .env file + key management
+├─ [15 min] Finding #3: Replace CorsLayer::permissive()
+│
+└─ Result: Path traversal, API key, and CORS vulnerabilities fixed
+
+WEEK 3 (Hardening - 1 hour total)
+│
+├─ [15 min] Finding #6: Proper Windows privilege detection
+├─ [20 min] Finding #8: Add security headers (CSP, X-Frame-Options, etc.)
+├─ [15 min] Add rate limiting middleware
+│
+└─ Result: Complete hardening, production-ready
+
+================================================================================
+RISK ASSESSMENT BY DEPLOYMENT SCENARIO
+================================================================================
+
+LOCALHOST ONLY (Current default):
+├─ Path Traversal:     MEDIUM → LOW (whitelist works)
+├─ XSS:                MEDIUM → CRITICAL (user might serve docs publicly)
+├─ CORS:               LOW (localhost only)
+├─ API Key:            MEDIUM (shell history leak)
+├─ Input Limits:       LOW → MEDIUM (same machine)
+│
+└─ Overall: ACCEPTABLE with XSS fix (Finding #2 required)
+
+NETWORK BOUND (0.0.0.0 or specific IP):
+├─ Path Traversal:     CRITICAL (symlinks, canonicalization)
+├─ XSS:                CRITICAL (untrusted LLM output)
+├─ CORS:               CRITICAL (cross-origin requests)
+├─ API Key:            CRITICAL (transmitted over network)
+├─ Input Limits:       CRITICAL (DoS attacks)
+│
+└─ Overall: NOT PRODUCTION READY - ALL FIXES REQUIRED
+
+================================================================================
+DEPENDENCIES & EXPOSURE
+================================================================================
+
+Affected Crates:
+  ✓ axum 0.8.4        (No known vulnerabilities)
+  ✓ tokio 1.47        (No known vulnerabilities)
+  ✓ reqwest 0.12      (No known vulnerabilities)
+  ✓ pulldown-cmark    (Markdown parser - safe, doesn't execute code)
+  ✓ serde/serde_json  (Serialization - no vulnerabilities)
+
+Third-party LLM API:
+  ✗ Zhipu GLM-4.7-Flash (UNTRUSTED - requires HTML sanitization)
+
+External CDN Dependencies:
+  ✗ cdn.jsdelivr.net/mermaid (Must add to CSP)
+  ✗ fonts.googleapis.com (Already safe)
+
+================================================================================
+COMPLIANCE REFERENCES
+================================================================================
+
+OWASP Top 10 2021:
+  A01:2021 - Broken Access Control        ← Findings #1, #3, #5, #7
+  A02:2021 - Cryptographic Failures       ← Finding #4
+  A03:2021 - Injection                    ← Finding #2 (XSS)
+  A04:2021 - Insecure Design              ← Finding #6
+
+CWE Top 25 2023:
+  CWE-22   - Improper Limitation of a Pathname to a Restricted Directory (Path Traversal)
+  CWE-79   - Improper Neutralization of Input During Web Page Generation (XSS)
+  CWE-400  - Uncontrolled Resource Consumption (DoS)
+  CWE-798  - Use of Hard-Coded Credentials
+
+================================================================================
+RECOMMENDATIONS FOR STAKEHOLDERS
+================================================================================
+
+FOR DEVELOPERS:
+  • Implement fixes in priority order (Week 1-3 timeline above)
+  • Use provided code examples in SECURITY_FIXES_GUIDE.md
+  • Follow defense-in-depth approach (multiple layers, not single fix)
+  • Add test cases for each vulnerability after fixing
+  • Enable clippy warnings: cargo clippy --all-targets -- -D warnings
+
+FOR DEVOPS/DEPLOYMENT:
+  • Do NOT bind to 0.0.0.0 without network isolation
+  • Store LITHO_BOOK_LLM_KEY in secrets manager, never in shell env
+  • Add rate limiting at reverse proxy level (if exposed)
+  • Monitor error logs for exploitation attempts
+  • Document security headers configuration
+  • Restrict network access to localhost (127.0.0.1 only)
+
+FOR SECURITY TEAM:
+  • Schedule weekly code review during remediation
+  • Perform dynamic security testing after each fix (testing scripts provided)
+  • Add static analysis to CI/CD (cargo clippy, cargo-audit)
+  • Monitor for new vulnerabilities in dependencies (cargo outdated)
+  • Document security architecture in threat model
+
+FOR PROJECT MAINTAINERS:
+  • Add SECURITY.md with responsible disclosure policy
+  • Include security audit findings in release notes
+  • Plan quarterly security reviews
+  • Consider SBOM (Software Bill of Materials) generation
+  • Evaluate signing commits with GPG for supply chain security
+
+================================================================================
+FILES REFERENCED IN AUDIT
+================================================================================
+
+Source Code:
+  ✓ /c/codedev/litho-book/src/main.rs          (187 lines)
+  ✓ /c/codedev/litho-book/src/cli.rs           (87 lines)
+  ✓ /c/codedev/litho-book/src/server.rs        (549 lines)
+  ✓ /c/codedev/litho-book/src/filesystem.rs    (406 lines)
+  ✓ /c/codedev/litho-book/src/error.rs         (40 lines)
+  ✓ /c/codedev/litho-book/templates/index.html.tpl (~5,600 lines)
+  ✓ /c/codedev/litho-book/Cargo.toml           (51 lines)
+
+Audit Documents Created:
+  ✓ SECURITY_AUDIT_REPORT.md           (Detailed technical findings)
+  ✓ SECURITY_FIXES_GUIDE.md            (Implementation code examples)
+  ✓ SECURITY_EXECUTIVE_SUMMARY.txt     (This file)
+
+================================================================================
+KEY TAKEAWAYS
+================================================================================
+
+1. CURRENT STATE: Designed for localhost use only; not production-ready
+   for network exposure.
+
+2. CRITICAL RISKS: XSS in AI responses and path traversal whitelist bypass
+   must be fixed immediately.
+
+3. TIMELINE: All fixes can be completed in 5-6 hours by experienced developer.
+
+4. REMEDIATION: Provided code examples in SECURITY_FIXES_GUIDE.md follow
+   secure coding best practices and OWASP recommendations.
+
+5. TESTING: Test cases provided in SECURITY_AUDIT_REPORT.md to verify each fix.
+
+6. ONGOING: Implement security headers, rate limiting, and audit logging for
+   long-term security posture.
+
+================================================================================
+AUDIT COMPLETION
+================================================================================
+
+This audit was performed via static code analysis only. No changes were made
+to the codebase. All findings are based on source code review and do not
+represent active testing or dynamic analysis.
+
+For questions or clarification on findings, refer to:
+  • SECURITY_AUDIT_REPORT.md - Detailed technical analysis
+  • SECURITY_FIXES_GUIDE.md - Implementation guidance with code examples
+
+================================================================================

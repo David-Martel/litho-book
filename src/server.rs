@@ -1,7 +1,8 @@
+use std::sync::Arc;
+
 use axum::{
     Router,
     extract::{Query, State},
-    http::StatusCode,
     response::{Html, Json, Sse, sse::Event},
     routing::{get, post},
 };
@@ -12,12 +13,17 @@ use std::time::Duration;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{debug, error, info};
 
+use crate::error::LithoBookError;
 use crate::filesystem::{DocumentTree, SearchResult};
+use crate::utils;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub doc_tree: DocumentTree,
+    pub doc_tree: Arc<DocumentTree>,
     pub docs_path: String,
+    pub index_html: Arc<String>,
+    pub http_client: reqwest::Client,
+    pub llm_key: Arc<String>,
 }
 
 #[derive(Deserialize)]
@@ -103,9 +109,23 @@ pub struct StreamEvent {
 
 /// Create the main application router
 pub fn create_router(doc_tree: DocumentTree, docs_path: String) -> Router {
+    let tree_json = serde_json::to_string(&doc_tree.root).unwrap_or_else(|e| {
+        tracing::error!("Failed to serialize document tree: {}", e);
+        "{}".to_string()
+    });
+    let index_html = Arc::new(generate_index_html(&tree_json, &docs_path));
+
+    let llm_key_value = std::env::var("LITHO_BOOK_LLM_KEY").unwrap_or_else(|_| {
+        tracing::warn!("LITHO_BOOK_LLM_KEY not set; AI chat will not work");
+        String::new()
+    });
+
     let state = AppState {
-        doc_tree,
+        doc_tree: Arc::new(doc_tree),
         docs_path,
+        index_html,
+        http_client: reqwest::Client::new(),
+        llm_key: Arc::new(llm_key_value),
     };
 
     Router::new()
@@ -122,63 +142,41 @@ pub fn create_router(doc_tree: DocumentTree, docs_path: String) -> Router {
 }
 
 /// Serve the main index page
-async fn index_handler(State(state): State<AppState>) -> Result<Html<String>, StatusCode> {
+async fn index_handler(State(state): State<AppState>) -> Html<String> {
     debug!("Serving index page");
-
-    let tree_json = serde_json::to_string(&state.doc_tree.root).map_err(|e| {
-        error!("Failed to serialize document tree: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let html = generate_index_html(&tree_json, &state.docs_path);
-    Ok(Html(html))
+    Html((*state.index_html).clone())
 }
 
 /// Get file content and render as HTML
 async fn get_file_handler(
     Query(params): Query<FileQuery>,
     State(state): State<AppState>,
-) -> Result<Json<FileResponse>, StatusCode> {
-    let file_path = params.file.ok_or_else(|| {
-        debug!("Missing file parameter in request");
-        StatusCode::BAD_REQUEST
+) -> Result<Json<FileResponse>, LithoBookError> {
+    let file_path = params.file.ok_or(LithoBookError::InvalidPath {
+        path: "(missing)".to_string(),
     })?;
 
     debug!("Requesting file: {}", file_path);
 
-    let content = state.doc_tree.get_file_content(&file_path).map_err(|e| {
-        error!("Failed to read file {}: {}", file_path, e);
-        StatusCode::NOT_FOUND
-    })?;
+    let content =
+        state
+            .doc_tree
+            .get_file_content(&file_path)
+            .map_err(|_| LithoBookError::FileNotFound {
+                path: file_path.clone(),
+            })?;
 
     let html = state.doc_tree.render_markdown(&content);
 
-    // Get file metadata if available
-    let file_info = state
-        .doc_tree
-        .file_map
-        .get(&file_path)
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map(|metadata| {
-            let size = metadata.len();
-            let modified = metadata.modified().ok().and_then(|time| {
-                time.duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| {
-                        let datetime = chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)?;
-                        Some(datetime.format("%Y-%m-%d %H:%M:%S").to_string())
-                    })
-                    .flatten()
-            });
-            (size, modified)
-        });
+    // Get metadata from node_map (no disk I/O)
+    let node = state.doc_tree.node_map.get(&file_path);
 
     let response = FileResponse {
         content,
         html,
         path: file_path,
-        size: file_info.as_ref().map(|(size, _)| *size),
-        modified: file_info.and_then(|(_, modified)| modified),
+        size: node.and_then(|n| n.size),
+        modified: node.and_then(|n| n.modified.clone()),
     };
 
     info!("Successfully served file: {}", response.path);
@@ -186,24 +184,27 @@ async fn get_file_handler(
 }
 
 /// Get the document tree structure
-async fn get_tree_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn get_tree_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, LithoBookError> {
     debug!("Serving document tree");
-    Json(serde_json::to_value(&state.doc_tree.root).unwrap_or_default())
+    let value = serde_json::to_value(&state.doc_tree.root)?;
+    Ok(Json(value))
 }
 
 /// Search for content with full-text search
 async fn search_handler(
     Query(params): Query<SearchQuery>,
     State(state): State<AppState>,
-) -> Result<Json<SearchResponse>, StatusCode> {
+) -> Json<SearchResponse> {
     let query = params.q.unwrap_or_default();
 
     if query.trim().is_empty() {
-        return Ok(Json(SearchResponse {
+        return Json(SearchResponse {
             results: vec![],
             total: 0,
-            query: query.clone(),
-        }));
+            query,
+        });
     }
 
     debug!("Searching for: {}", query);
@@ -213,24 +214,21 @@ async fn search_handler(
 
     debug!("Found {} results matching query: {}", total, query);
 
-    Ok(Json(SearchResponse {
+    Json(SearchResponse {
         results,
         total,
         query,
-    }))
+    })
 }
 
 /// Get statistics about the document tree
 async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
     let stats = state.doc_tree.get_stats();
-
-    let formatted_size = format_bytes(stats.total_size);
-
     Json(StatsResponse {
         total_files: stats.total_files,
         total_dirs: stats.total_dirs,
         total_size: stats.total_size,
-        formatted_size,
+        formatted_size: utils::format_bytes(stats.total_size),
     })
 }
 
@@ -256,6 +254,8 @@ async fn chat_stream_handler(
             request.context.as_deref(),
             request.history,
             &state.docs_path,
+            &state.http_client,
+            &state.llm_key,
         ).await {
             Ok(mut response_stream) => {
                 let mut full_response = String::new();
@@ -341,20 +341,20 @@ async fn call_openai_stream_api(
     context: Option<&str>,
     history: Option<Vec<OpenAIMessage>>,
     _docs_path: &str,
+    client: &reqwest::Client,
+    llm_key: &str,
 ) -> Result<
     tokio::sync::mpsc::Receiver<Result<String, Box<dyn std::error::Error + Send + Sync>>>,
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let client = reqwest::Client::new();
-
     // 构建系统提示词
     let mut system_prompt = "你是一个专业的文档助手，专门帮助用户理解和分析技术文档。请用中文回答问题，回答要准确、简洁、有帮助。".to_string();
 
     // 添加上下文（如果有的话）
-    if let Some(ctx) = context {
-        if !ctx.is_empty() {
-            system_prompt.push_str(&format!("\n\n用户提供的上下文信息：\n{}", ctx));
-        }
+    if let Some(ctx) = context
+        && !ctx.is_empty()
+    {
+        system_prompt.push_str(&format!("\n\n用户提供的上下文信息：\n{}", ctx));
     }
 
     // 构建消息列表
@@ -391,20 +391,7 @@ async fn call_openai_stream_api(
 
     let response = client
         .post("https://open.bigmodel.cn/api/paas/v4/chat/completions")
-        .header(
-            "Authorization",
-            {
-                use std::env;
-                use tracing::log::error;
-
-                let llm_key = env::var("LITHO_BOOK_LLM_KEY").unwrap_or_else(|_| {
-                    error!("LITHO_BOOK_LLM_KEY environment variable not set, using empty string");
-                    String::new()
-                });
-
-                format!("Bearer {}", llm_key)
-            },
-        )
+        .header("Authorization", format!("Bearer {}", llm_key))
         .header("Content-Type", "application/json")
         .json(&request_body)
         .send()
@@ -432,51 +419,41 @@ async fn call_openai_stream_api(
                     let chunk_str = String::from_utf8_lossy(&chunk);
                     buffer.push_str(&chunk_str);
 
-                    // 处理SSE格式的数据
-                    let lines: Vec<&str> = buffer.lines().collect();
-                    let mut processed_lines = 0;
+                    let ends_with_newline = buffer.ends_with('\n');
+                    let mut lines: Vec<String> = buffer.lines().map(str::to_string).collect();
+                    let incomplete_tail = if !ends_with_newline {
+                        lines.pop()
+                    } else {
+                        None
+                    };
 
                     for line in &lines {
-                        if line.starts_with("data: ") {
-                            let data = &line[6..]; // 移除 "data: " 前缀
-
+                        if let Some(data) = line.strip_prefix("data: ") {
                             if data == "[DONE]" {
-                                // 流结束
                                 return;
                             }
 
-                            // 尝试解析JSON
                             if let Ok(stream_response) =
                                 serde_json::from_str::<OpenAIStreamResponse>(data)
+                                && let Some(choice) = stream_response.choices.first()
                             {
-                                if let Some(choice) = stream_response.choices.first() {
-                                    if let Some(content) = &choice.delta.content {
-                                        if !content.is_empty() {
-                                            if tx.send(Ok(content.clone())).await.is_err() {
-                                                return; // 接收端已关闭
-                                            }
-                                        }
-                                    }
+                                if let Some(content) = &choice.delta.content
+                                    && !content.is_empty()
+                                    && tx.send(Ok(content.clone())).await.is_err()
+                                {
+                                    return;
+                                }
 
-                                    // 检查是否完成
-                                    if choice.finish_reason.is_some() {
-                                        return;
-                                    }
+                                if choice.finish_reason.is_some() {
+                                    return;
                                 }
                             }
-                            processed_lines += 1;
-                        } else if line.is_empty() {
-                            processed_lines += 1;
-                        } else {
-                            processed_lines += 1;
                         }
                     }
 
-                    // 保留未处理的部分
-                    if processed_lines < lines.len() {
-                        buffer = lines[processed_lines..].join("\n");
-                    } else {
-                        buffer.clear();
+                    buffer.clear();
+                    if let Some(tail) = incomplete_tail {
+                        buffer.push_str(&tail);
                     }
                 }
                 Err(e) => {
@@ -522,29 +499,6 @@ fn generate_suggestions(ai_response: &str, _context: Option<&str>) -> Vec<String
     suggestions
 }
 
-/// Format bytes into human-readable format
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-
-    let mut size = bytes as f64;
-    let mut unit_index = 0;
-
-    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_index += 1;
-    }
-
-    if unit_index == 0 {
-        format!("{} {}", bytes, UNITS[unit_index])
-    } else {
-        format!("{:.1} {}", size, UNITS[unit_index])
-    }
-}
-
 /// Generate the main HTML page
 fn generate_index_html(tree_json: &str, docs_path: &str) -> String {
     // Read the template file
@@ -554,4 +508,155 @@ fn generate_index_html(tree_json: &str, docs_path: &str) -> String {
     template_content
         .replace("{{ tree_json|safe }}", tree_json)
         .replace("{{ docs_path }}", docs_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use http::Request;
+    use tower::ServiceExt;
+
+    /// Build a test router backed by a temporary directory containing one
+    /// `test.md` file.  The `TempDir` is returned alongside the `Router` so
+    /// the caller can bind it to a local variable, keeping the directory alive
+    /// for the full duration of the test.
+    fn make_test_app() -> (Router, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.md"), "# Test\nHello world").unwrap();
+        let tree = crate::filesystem::DocumentTree::new(dir.path()).unwrap();
+        let docs_path = dir.path().display().to_string().replace('\\', "/");
+        let router = create_router(tree, docs_path);
+        (router, dir)
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_index_endpoint() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_tree_endpoint() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tree")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_stats_endpoint() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_file_endpoint_found() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/file?file=test.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_file_endpoint_not_found() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/file?file=missing.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn test_file_endpoint_no_param() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/file")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn test_search_endpoint() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=Hello")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_search_endpoint_empty() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
 }

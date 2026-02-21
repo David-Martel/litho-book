@@ -1,0 +1,13 @@
+{
+  "contexts": [
+    {
+      "id": "ctx-litho-book-20260220",
+      "file": "litho-book-context-20260220.md",
+      "created": "2026-02-20T00:00:00Z",
+      "project": "litho-book",
+      "agents_involved": ["Explore-sonnet", "claude-opus-4-6"],
+      "summary": "Initial context save: full architecture analysis, CLAUDE.md creation, GitHub fork setup (litho-book + deepwiki-rs + mermaid-fixer to David-Martel), remote configuration"
+    }
+  ],
+  "latest": "ctx-litho-book-20260220"
+}
