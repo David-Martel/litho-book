@@ -3,6 +3,7 @@ mod error;
 mod filesystem;
 mod server;
 mod utils;
+mod watcher;
 
 use clap::Parser;
 use tracing::{error, info, warn};
