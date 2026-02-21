@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::broadcast;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -153,7 +153,6 @@ pub fn classify_event(
 /// # Errors
 ///
 /// Returns an error if `notify` cannot set up watches on either directory.
-#[allow(dead_code)] // consumed by downstream pipeline phases
 pub fn start_watcher(
     config: WatcherConfig,
 ) -> anyhow::Result<(broadcast::Sender<WatchEvent>, tokio::task::JoinHandle<()>)> {
@@ -248,7 +247,7 @@ pub fn start_watcher(
             }
         }
 
-        error!("Watcher loop exited unexpectedly");
+        debug!("Watcher loop exited (normal shutdown)");
     });
 
     Ok((broadcast_tx, handle))

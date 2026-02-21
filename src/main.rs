@@ -51,9 +51,29 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Start file watcher if --watch flag is set
+    let watcher_tx = if args.watch {
+        match watcher::start_watcher(watcher::WatcherConfig {
+            docs_dir: args.docs_dir.clone(),
+            source_dir: args.source_dir.clone(),
+            debounce_ms: args.watch_debounce,
+        }) {
+            Ok((tx, _handle)) => {
+                info!("Hot reload enabled (debounce: {}ms)", args.watch_debounce);
+                Some(tx)
+            }
+            Err(e) => {
+                warn!("Failed to start file watcher: {}. Continuing without hot reload.", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Create router
     let docs_path = args.docs_dir.display().to_string().replace('\\', "/");
-    let app = server::create_router(doc_tree, docs_path);
+    let app = server::create_router(doc_tree, docs_path, watcher_tx);
 
     // Start server
     let bind_address = args.bind_address();
