@@ -67,20 +67,21 @@ impl From<&LithoBookError> for StatusCode {
 impl IntoResponse for LithoBookError {
     fn into_response(self) -> Response {
         tracing::error!("{}", self);
-        let status: StatusCode = StatusCode::from(&self);
-
-        if let LithoBookError::RateLimited { retry_after } = &self {
-            let retry_str = retry_after.to_string();
-            let mut response = (status, self.to_string()).into_response();
-            if let Ok(header_val) = HeaderValue::from_str(&retry_str) {
+        match &self {
+            LithoBookError::RateLimited { retry_after } => {
+                let mut response =
+                    (StatusCode::TOO_MANY_REQUESTS, self.to_string()).into_response();
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    HeaderValue::from(*retry_after), // From<u64> — infallible
+                );
                 response
-                    .headers_mut()
-                    .insert(axum::http::header::RETRY_AFTER, header_val);
             }
-            return response;
+            _ => {
+                let status: StatusCode = StatusCode::from(&self);
+                (status, self.to_string()).into_response()
+            }
         }
-
-        (status, self.to_string()).into_response()
     }
 }
 
@@ -151,6 +152,17 @@ mod tests {
     fn test_rate_limited_status() {
         let err = LithoBookError::RateLimited { retry_after: 60 };
         assert_eq!(StatusCode::from(&err), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn test_rate_limited_into_response_has_retry_after_header() {
+        let err = LithoBookError::RateLimited { retry_after: 60 };
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get("retry-after").map(|v| v.as_bytes()),
+            Some(b"60".as_ref()),
+        );
     }
 
     #[test]
