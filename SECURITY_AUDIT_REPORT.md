@@ -244,10 +244,10 @@ let response = client
 ```bash
 # Attacker compromises shell history
 cat ~/.bash_history | grep LITHO_BOOK_LLM_KEY
-# Output: export LITHO_BOOK_LLM_KEY=sk_live_1234567890abcdef
+# Output: export LITHO_BOOK_LLM_KEY=EXAMPLE_NOT_A_REAL_KEY
 
 # Now attacker can abuse the LLM API directly
-curl -H "Authorization: Bearer sk_live_1234567890abcdef" \
+curl -H "Authorization: Bearer EXAMPLE_NOT_A_REAL_KEY" \
   https://open.bigmodel.cn/api/paas/v4/chat/completions \
   -d '{"model":"GLM-4.7-Flash","messages":[...]}'
 ```

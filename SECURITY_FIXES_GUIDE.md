@@ -542,7 +542,7 @@ async fn chat_stream_handler(
 
 ```bash
 # .env (DO NOT COMMIT TO GIT!)
-LITHO_BOOK_LLM_KEY=sk_live_your_actual_key_here
+LITHO_BOOK_LLM_KEY=your-api-key-here
 ```
 
 ### .gitignore Update

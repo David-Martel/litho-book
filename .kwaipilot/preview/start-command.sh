@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-cd /Users/jiangmeng/workspace/SAW/litho-book
+cd "$(dirname "$0")/../.."
 cargo run -- --docs-dir test-docs

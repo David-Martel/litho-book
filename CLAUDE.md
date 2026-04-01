@@ -11,7 +11,7 @@ deepwiki-rs -p ./some-project -o ./docs   # generate docs
 litho-book --docs-dir ./docs --open       # read them
 ```
 
-`deepwiki-rs` is installed locally at `C:\Users\david\.cargo\bin\deepwiki-rs.exe`.
+`deepwiki-rs` should be installed and available on `$PATH` (or via `cargo install`).
 
 ## Build Commands
 
