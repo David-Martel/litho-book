@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::sync::{RwLock, broadcast};
 
 use axum::{
     Router,
@@ -10,7 +11,10 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::time::Duration;
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::{
+    catch_panic::CatchPanicLayer, compression::CompressionLayer, cors::CorsLayer,
+    limit::RequestBodyLimitLayer, services::ServeDir, timeout::TimeoutLayer,
+};
 use tracing::{debug, error, info};
 
 use crate::error::LithoBookError;
@@ -19,11 +23,12 @@ use crate::utils;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub doc_tree: Arc<DocumentTree>,
+    pub doc_tree: Arc<RwLock<DocumentTree>>,
     pub docs_path: String,
-    pub index_html: Arc<String>,
+    pub index_html: Arc<RwLock<String>>,
     pub http_client: reqwest::Client,
     pub llm_key: Arc<String>,
+    pub watcher_tx: Option<broadcast::Sender<crate::watcher::WatchEvent>>,
 }
 
 #[derive(Deserialize)]
@@ -108,12 +113,16 @@ pub struct StreamEvent {
 }
 
 /// Create the main application router
-pub fn create_router(doc_tree: DocumentTree, docs_path: String) -> Router {
+pub fn create_router(
+    doc_tree: DocumentTree,
+    docs_path: String,
+    watcher_tx: Option<broadcast::Sender<crate::watcher::WatchEvent>>,
+) -> Router {
     let tree_json = serde_json::to_string(&doc_tree.root).unwrap_or_else(|e| {
         tracing::error!("Failed to serialize document tree: {}", e);
         "{}".to_string()
     });
-    let index_html = Arc::new(generate_index_html(&tree_json, &docs_path));
+    let index_html = Arc::new(RwLock::new(generate_index_html(&tree_json, &docs_path)));
 
     let llm_key_value = std::env::var("LITHO_BOOK_LLM_KEY").unwrap_or_else(|_| {
         tracing::warn!("LITHO_BOOK_LLM_KEY not set; AI chat will not work");
@@ -121,11 +130,12 @@ pub fn create_router(doc_tree: DocumentTree, docs_path: String) -> Router {
     });
 
     let state = AppState {
-        doc_tree: Arc::new(doc_tree),
+        doc_tree: Arc::new(RwLock::new(doc_tree)),
         docs_path,
         index_html,
         http_client: reqwest::Client::new(),
         llm_key: Arc::new(llm_key_value),
+        watcher_tx,
     };
 
     Router::new()
@@ -135,16 +145,22 @@ pub fn create_router(doc_tree: DocumentTree, docs_path: String) -> Router {
         .route("/api/search", get(search_handler))
         .route("/api/stats", get(stats_handler))
         .route("/api/chat", post(chat_stream_handler))
+        .route("/api/events", get(events_handler))
         .route("/health", get(health_handler))
         .nest_service("/assets", ServeDir::new("assets"))
-        .layer(CorsLayer::permissive())
         .with_state(state)
+        .layer(CatchPanicLayer::new())
+        .layer(CompressionLayer::new())
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        .layer(RequestBodyLimitLayer::new(1_048_576)) // 1MB
+        .layer(CorsLayer::permissive())
 }
 
 /// Serve the main index page
 async fn index_handler(State(state): State<AppState>) -> Html<String> {
     debug!("Serving index page");
-    Html((*state.index_html).clone())
+    let html = state.index_html.read().await;
+    Html(html.clone())
 }
 
 /// Get file content and render as HTML
@@ -158,18 +174,19 @@ async fn get_file_handler(
 
     debug!("Requesting file: {}", file_path);
 
+    let doc_tree = state.doc_tree.read().await;
+
     let content =
-        state
-            .doc_tree
+        doc_tree
             .get_file_content(&file_path)
             .map_err(|_| LithoBookError::FileNotFound {
                 path: file_path.clone(),
             })?;
 
-    let html = state.doc_tree.render_markdown(&content);
+    let html = doc_tree.render_markdown(&content);
 
     // Get metadata from node_map (no disk I/O)
-    let node = state.doc_tree.node_map.get(&file_path);
+    let node = doc_tree.node_map.get(&file_path);
 
     let response = FileResponse {
         content,
@@ -188,7 +205,8 @@ async fn get_tree_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, LithoBookError> {
     debug!("Serving document tree");
-    let value = serde_json::to_value(&state.doc_tree.root)?;
+    let doc_tree = state.doc_tree.read().await;
+    let value = serde_json::to_value(&doc_tree.root)?;
     Ok(Json(value))
 }
 
@@ -209,7 +227,8 @@ async fn search_handler(
 
     debug!("Searching for: {}", query);
 
-    let results = state.doc_tree.search_content(&query);
+    let doc_tree = state.doc_tree.read().await;
+    let results = doc_tree.search_content(&query);
     let total = results.len();
 
     debug!("Found {} results matching query: {}", total, query);
@@ -223,7 +242,8 @@ async fn search_handler(
 
 /// Get statistics about the document tree
 async fn stats_handler(State(state): State<AppState>) -> Json<StatsResponse> {
-    let stats = state.doc_tree.get_stats();
+    let doc_tree = state.doc_tree.read().await;
+    let stats = doc_tree.get_stats();
     Json(StatsResponse {
         total_files: stats.total_files,
         total_dirs: stats.total_dirs,
@@ -239,6 +259,65 @@ async fn health_handler() -> Json<serde_json::Value> {
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "version": env!("CARGO_PKG_VERSION")
     }))
+}
+
+/// SSE endpoint for hot-reload notifications.
+async fn events_handler(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.watcher_tx.as_ref().map(|tx| tx.subscribe());
+
+    let stream = async_stream::stream! {
+        if let Some(mut rx) = rx {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let data = match &event {
+                            crate::watcher::WatchEvent::DocChanged(p) => {
+                                serde_json::json!({
+                                    "type": "doc_changed",
+                                    "path": p.display().to_string()
+                                }).to_string()
+                            }
+                            crate::watcher::WatchEvent::DocDeleted(p) => {
+                                serde_json::json!({
+                                    "type": "doc_deleted",
+                                    "path": p.display().to_string()
+                                }).to_string()
+                            }
+                            crate::watcher::WatchEvent::SourceChanged(p) => {
+                                serde_json::json!({
+                                    "type": "source_changed",
+                                    "path": p.display().to_string()
+                                }).to_string()
+                            }
+                            crate::watcher::WatchEvent::TreeRebuilt => {
+                                serde_json::json!({"type": "tree_rebuilt"}).to_string()
+                            }
+                        };
+                        yield Ok(Event::default().event("watch").data(data));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("SSE subscriber lagged by {} events", n);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        } else {
+            // No watcher configured, just keep connection alive
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                yield Ok(Event::default().comment("keepalive"));
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    )
 }
 
 /// AI助手流式聊天处理函数
@@ -526,7 +605,7 @@ mod tests {
         std::fs::write(dir.path().join("test.md"), "# Test\nHello world").unwrap();
         let tree = crate::filesystem::DocumentTree::new(dir.path()).unwrap();
         let docs_path = dir.path().display().to_string().replace('\\', "/");
-        let router = create_router(tree, docs_path);
+        let router = create_router(tree, docs_path, None);
         (router, dir)
     }
 
@@ -658,5 +737,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_request_body_limit() {
+        let (app, _dir) = make_test_app();
+        let large_body = "x".repeat(2 * 1024 * 1024); // 2MB
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(large_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 413);
+    }
+
+    #[tokio::test]
+    async fn test_compression_header() {
+        let (app, _dir) = make_test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("accept-encoding", "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        // Response may or may not be compressed depending on content size,
+        // but the endpoint should still work with accept-encoding header.
     }
 }

@@ -14,7 +14,7 @@ clap = { version = "4.5", features = ["derive"] }
 # Web服务框架
 axum = "0.8.4"
 tokio = { version = "1.47", features = ["full"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "timeout", "compression-gzip", "limit", "catch-panic"] }
 
 # Markdown处理
 pulldown-cmark = "0.13"
@@ -31,6 +31,9 @@ thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# Middleware utilities
+tower = { version = "0.5", features = ["util"] }
+
 # 时间处理
 chrono = { version = "0.4", features = ["serde"] }
 
@@ -40,6 +43,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # 异步流处理
 async-stream = "0.3"
 futures = "0.3"
+notify = "8"
 
 # Unix系统调用 (用于权限检查)
 [target.'cfg(unix)'.dependencies]
@@ -47,5 +51,4 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
 http = "1"
